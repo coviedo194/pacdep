@@ -1,0 +1,15 @@
+# macOS
+.DS_Store
+
+# Archivos generados por el script (no commitear)
+logs/
+solution.zip
+solution_managed.zip
+settings_generated.json
+config.json
+
+# Editor
+.vscode/
+*.swp
+*.swo
+*~
