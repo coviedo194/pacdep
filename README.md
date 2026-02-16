@@ -1,4 +1,4 @@
-# pacdep.ps1 — Automatización de despliegues de soluciones de Dataverse con PAC - v1.0.0
+# pacdep.ps1 — Automatización de despliegues de soluciones de Dataverse con PAC - v1.0.1
 
 Script PowerShell para exportar e importar soluciones de Dataverse (Power Platform) entre entornos DEV, PRE y PRO usando el CLI `pac`. Automatiza el flujo de despliegue, genera archivos de configuración y valida settings, permitiendo un proceso colaborativo y seguro.
 
@@ -198,3 +198,9 @@ El autor no se hace responsable por daños, perdida de datos o errores derivados
 
 Happy coding!
 Jajetopata! 🇵🇾✌🏽
+
+---
+
+## Historial de Versiones
+
+- v1.0.1 (2026-02-16): Ahora el script genera automáticamente el archivo settings_generated.json también cuando se usa -ExportOnly (solo exportar), no solo en despliegues completos.
