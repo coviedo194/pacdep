@@ -510,8 +510,7 @@ if (-not $ImportOnly) {
             if ($genContent -and $genContent.Trim().Length -gt 5) {
                 Write-Log "  OK: settings_generated.json generado."
                 Write-Log "  Si la solucion tiene variables de entorno o referencias de conexion, revisa este archivo."
-            }
-            else {
+            } else {
                 Write-Log "  OK: La solucion no requiere variables de entorno ni referencias de conexion."
                 Remove-Item $settingsGenerated -Force
             }
@@ -699,7 +698,7 @@ else {
         # Todos los archivos de settings verificados OK
         if ($envsToCheck.Count -gt 0) {
             $settingsNeeded = $true
-            Remove-Item $settingsGenerated -Force
+            # No eliminar settings_generated.json si tiene datos
         }
         Write-Log ""
     }

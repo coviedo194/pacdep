@@ -1,5 +1,9 @@
 # Copilot Instructions — pacdep.ps1
 
+## Regla de análisis automático
+
+Siempre que sea relevante para responder sobre el proceso, revisa el script directamente (pacdep.ps1 y archivos relacionados) sin preguntar al usuario si desea que lo analices. Anticipa posibles causas o comportamientos del código para dar respuestas precisas y útiles.
+
 ## Proyecto
 
 **pacdep.ps1** es un script PowerShell que automatiza el despliegue de soluciones de Dataverse (Power Platform) desde un entorno DEV hacia PRE y/o PRO usando el CLI `pac`.
