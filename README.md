@@ -16,7 +16,7 @@ Script PowerShell para exportar e importar soluciones de Dataverse (Power Platfo
 pwsh ./pacdep.ps1 -TargetEnv pre
 
 # Despliegue solo a PRO
-pwsh ./pacdep.ps1 -TargetEnv pre
+pwsh ./pacdep.ps1 -TargetEnv pro
 
 # Despliegue solo a PRE y a PRO
 pwsh ./pacdep.ps1 -TargetEnv both
