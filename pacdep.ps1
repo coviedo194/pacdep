@@ -1,6 +1,6 @@
 # =============================================================================
 # pacdep.ps1 - Automated Dataverse Solution Deployer
-# Version: 1.0.1
+# Version: 1.0.3
 # Autor: Carlos Oviedo Gibbons (github.com/coviedo194)
 # Licencia: MIT
 # Descripcion: Exporta una solucion de Dataverse desde DEV e importa a PRE/PRO
@@ -79,7 +79,7 @@ param(
     [switch]$ShowHelp
 )
 
-$ScriptVersion = "1.0.1"
+$ScriptVersion = "1.0.3"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHOW HELP
@@ -234,6 +234,73 @@ function Assert-PacSuccess {
         Write-Log "ERROR en: $StepDescription (exit code: $LASTEXITCODE)"
         exit 1
     }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Obtener lista de soluciones desde pac como objetos PS
+# Soporta distintos formatos de salida de pac solution list
+# ─────────────────────────────────────────────────────────────────────────────
+function Get-PacSolutionList {
+    $rawOutput = pac solution list --json 2>$null
+    Assert-PacSuccess "Listar soluciones (pac solution list --json)"
+
+    $jsonText = ($rawOutput | Out-String).Trim()
+
+    if (-not $jsonText) {
+        Write-Log "  ERROR: pac solution list --json no devolvio datos." -Color Red
+        exit 1
+    }
+
+    try {
+        $parsed = $jsonText | ConvertFrom-Json
+    }
+    catch {
+        Write-Log "  ERROR: No se pudo parsear la salida JSON de pac solution list." -Color Red
+        Write-Log "  Salida recibida (primeros 500 chars):"
+        Write-Log "  $($jsonText.Substring(0, [Math]::Min(500, $jsonText.Length)))"
+        exit 1
+    }
+
+    # Soportar formato con envolvente { "value": [...] } o array directo [...]
+    if ($parsed -is [array]) {
+        return $parsed
+    }
+    elseif ($parsed.value) {
+        return $parsed.value
+    }
+    else {
+        Write-Log "  ERROR: Formato inesperado en la salida de pac solution list --json." -Color Red
+        exit 1
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Buscar una solucion por UniqueName en la lista de soluciones
+# Soporta variantes de nombre de propiedad segun version de PAC CLI
+# ─────────────────────────────────────────────────────────────────────────────
+function Find-Solution {
+    param(
+        [object[]]$SolutionList,
+        [string]$SolutionName
+    )
+    foreach ($sol in $SolutionList) {
+        $uniqueName = $null
+        foreach ($prop in @("SolutionUniqueName", "UniqueName", "uniqueName", "solutionUniqueName")) {
+            if ($sol.PSObject.Properties[$prop]) { $uniqueName = $sol.$prop; break }
+        }
+        if ($uniqueName -eq $SolutionName) {
+            return $sol
+        }
+    }
+    return $null
+}
+
+function Get-SolutionVersion {
+    param([object]$Solution)
+    foreach ($prop in @("VersionNumber", "Version", "versionNumber", "version")) {
+        if ($Solution.PSObject.Properties[$prop]) { return $Solution.$prop }
+    }
+    return $null
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -440,28 +507,27 @@ Write-Log ""
 if (-not $ImportOnly) {
     Select-AuthProfile $config.dev.authProfile $config.dev.env
 
-    $listOutput = pac solution list 2>&1
-    Assert-PacSuccess "Listar soluciones en DEV"
+    $solutions = Get-PacSolutionList
+    $targetSolution = Find-Solution -SolutionList $solutions -SolutionName $solutionName
 
-    $currentVersion = $null
-    foreach ($line in $listOutput) {
-        $lineStr = "$line"
-        if ($lineStr -match [regex]::Escape($solutionName) -and $lineStr -match '(\d+\.\d+\.\d+\.\d+)') {
-            $currentVersion = $Matches[1]
-            break
-        }
+    if (-not $targetSolution) {
+        Write-Log "  ERROR: No se encontro la solucion '$solutionName' en DEV." -Color Red
+        Write-Log "  Verifica que solutionName en config.json coincida con el Unique Name." -Color Red
+        exit 1
     }
 
+    $currentVersion = Get-SolutionVersion -Solution $targetSolution
+
     if (-not $currentVersion) {
-        Write-Log "  ERROR: No se encontro la solucion '$solutionName' en DEV."
-        Write-Log "  Verifica que solutionName en config.json coincida con el Unique Name."
+        Write-Log "  ERROR: No se pudo obtener la version de '$solutionName' en DEV." -Color Red
+        Write-Log "  La salida de pac solution list --json no contiene la propiedad Version." -Color Red
         exit 1
     }
 
     if ($SkipVersionIncrement) {
         Write-Log "[5/8] Omitiendo incremento de version (-SkipVersionIncrement)..."
+        Write-Log "  Version actual en DEV: $currentVersion"
         $newVersion = $currentVersion
-        Write-Log "  Version actual (sin cambios): $currentVersion"
     }
     else {
         Write-Log "[5/8] Incrementando version de la solucion en DEV..."
@@ -471,7 +537,6 @@ if (-not $ImportOnly) {
         $parts[3] = [int]$parts[3] + 1
         $newVersion = $parts -join "."
 
-        Write-Log "  Nueva version:  $newVersion"
         pac solution online-version --solution-name $solutionName --solution-version $newVersion
         Assert-PacSuccess "Actualizar version en DEV"
         Write-Log "  OK: Version actualizada en DEV: $currentVersion -> $newVersion"
@@ -499,27 +564,6 @@ if (-not $ImportOnly) {
     Rename-Item $pacManaged $managedZip -Force
     Write-Log "  OK: $managedZip"
     Write-Log ""
-    # ─────────────────────────────────────────────────────────────────────────────
-    # GENERAR settings_generated.json SI SE USA -ExportOnly
-    # ─────────────────────────────────────────────────────────────────────────────
-    if ($ExportOnly) {
-        Write-Log "[7/8] Generando settings_generated.json desde solution.zip..."
-        pac solution create-settings --solution-zip $unmanagedZip --settings-file $settingsGenerated 2>&1 | Out-Null
-        if (Test-Path $settingsGenerated) {
-            $genContent = Get-Content $settingsGenerated -Raw
-            if ($genContent -and $genContent.Trim().Length -gt 5) {
-                Write-Log "  OK: settings_generated.json generado."
-                Write-Log "  Si la solucion tiene variables de entorno o referencias de conexion, revisa este archivo."
-            } else {
-                Write-Log "  OK: La solucion no requiere variables de entorno ni referencias de conexion."
-                Remove-Item $settingsGenerated -Force
-            }
-        }
-        else {
-            Write-Log "  ERROR: No se pudo generar settings_generated.json."
-        }
-        Write-Log ""
-    }
 }
 else {
     Write-Log "[5/8] Omitido (modo -ImportOnly)"
@@ -566,6 +610,7 @@ if ($ImportOnly -and -not (Test-Path $unmanagedZip)) {
 else {
 
     # Generar desde el zip exportado
+    Write-Log "  Generando settings_generated.json desde solution.zip..."
     pac solution create-settings --solution-zip $unmanagedZip --settings-file $settingsGenerated 2>&1 | Out-Null
 
     $generatedHasContent = $false
@@ -573,6 +618,7 @@ else {
         $genContent = Get-Content $settingsGenerated -Raw
         if ($genContent -and $genContent.Trim().Length -gt 5) {
             $generatedHasContent = $true
+            Write-Log "  OK: settings_generated.json generado."
         }
     }
 
@@ -755,8 +801,9 @@ function Import-Solution {
 
     # Detectar si la solucion ya existe en el entorno destino
     Write-Log "  -> Verificando si la solucion ya existe en $EnvLabel..."
-    $targetList = pac solution list 2>&1 | Out-String
-    $solutionExists = $targetList -match [regex]::Escape($solutionName)
+    $targetSolutions = Get-PacSolutionList
+    $existingSolution = Find-Solution -SolutionList $targetSolutions -SolutionName $solutionName
+    $solutionExists = $null -ne $existingSolution
 
     if ($solutionExists) {
         # --- UPGRADE: la solucion ya existe ---

@@ -6,10 +6,14 @@ logs/
 solution.zip
 solution_managed.zip
 settings_generated.json
-config.json
 
 # Editor
 .vscode/
 *.swp
 *.swo
 *~
+
+# Archivos de configuración, en esta repo no se commitean, no confundir con la repo que usted genere para su proyecto, en la cual si se deben commitear.
+settings_pre.json
+settings_pro.json
+config.json

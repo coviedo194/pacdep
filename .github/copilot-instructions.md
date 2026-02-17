@@ -87,9 +87,9 @@ Es una herramienta open source. El usuario descarga únicamente el archivo `pacd
 ## Convenciones del README.md
 
 - Texto en **español sin acentos** (ASCII limpio) para consistencia con el script.
-- Incluir sección "Historial de Versiones" al final, actualizar con cada cambio.
 - El campo `Version del script documentada` al inicio debe coincidir con `$ScriptVersion`.
 - Diagramas de flujo en texto plano (no Mermaid), para que sean legibles en cualquier terminal.
+- **El historial de versiones se gestiona exclusivamente con GitHub Releases.** No mantener una sección de historial en el README.
 
 ## Dependencias externas
 
@@ -125,7 +125,6 @@ pac solution upgrade --solution-name <name>
 
 Cuando el usuario pida cambios, considerar:
 - Actualizar `$ScriptVersion` y el header del .ps1.
-- Actualizar la sección "Historial de Versiones" en README.md.
 - Actualizar el conteo de pasos `[N/M]` si se agregan o eliminan pasos.
 - Mantener el README sincronizado con el comportamiento real del script.
 - Probar mentalmente el flujo completo antes de entregar cambios.
