@@ -1,6 +1,6 @@
 # =============================================================================
 # pacdep.ps1 - Automated Dataverse Solution Deployer
-# Version: 1.0.3
+# Version: 1.0.4
 # Autor: Carlos Oviedo Gibbons (github.com/coviedo194)
 # Licencia: MIT
 # Descripcion: Exporta una solucion de Dataverse desde DEV e importa a PRE/PRO
@@ -79,7 +79,7 @@ param(
     [switch]$ShowHelp
 )
 
-$ScriptVersion = "1.0.3"
+$ScriptVersion = "1.0.4"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHOW HELP
@@ -226,13 +226,172 @@ else {
 Write-Log ""
 
 # ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Notificacion nativa cross-platform (sin dependencias adicionales)
+# - macOS:   osascript (display notification)
+# - Windows: toast via PowerShell (BurntToast si existe, sino MessageBox)
+# - Linux:   notify-send (libnotify)
+# Si no se puede notificar, falla silenciosamente (no bloquea el flujo).
+# ─────────────────────────────────────────────────────────────────────────────
+function Send-Notification {
+    param(
+        [string]$Title = "pacdep",
+        [string]$Message,
+        [switch]$IsError
+    )
+    try {
+        if ($IsMacOS) {
+            $sound = if ($IsError) { 'Basso' } else { 'Glass' }
+            $safeMsg = $Message -replace '"', ''
+            $safeTitle = $Title -replace '"', ''
+            $appleScript = "display notification ""$safeMsg"" with title ""$safeTitle"" sound name ""$sound"""
+            & osascript -e $appleScript 2>$null
+        }
+        elseif ($IsWindows -or $env:OS -match 'Windows') {
+            # Intentar toast nativo de Windows 10/11 via .NET
+            try {
+                $xml = @"
+<toast>
+  <visual>
+    <binding template="ToastGeneric">
+      <text>$Title</text>
+      <text>$Message</text>
+    </binding>
+  </visual>
+  <audio src="ms-winsoundevent:Notification.Default" />
+</toast>
+"@
+                $null = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
+                $null = [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime]
+                $toastXml = [Windows.Data.Xml.Dom.XmlDocument]::new()
+                $toastXml.LoadXml($xml)
+                $appId = '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe'
+                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier($appId).Show(
+                    [Windows.UI.Notifications.ToastNotification]::new($toastXml)
+                )
+            }
+            catch {
+                # Fallback: MessageBox (bloquea pero funciona en cualquier Windows)
+                try {
+                    Add-Type -AssemblyName System.Windows.Forms -ErrorAction SilentlyContinue
+                    $icon = if ($IsError) { 'Error' } else { 'Information' }
+                    [System.Windows.Forms.MessageBox]::Show($Message, $Title, 'OK', $icon) | Out-Null
+                }
+                catch {
+                    # Sin GUI disponible, bell como ultimo recurso
+                    [Console]::Beep(800, 300)
+                }
+            }
+        }
+        elseif ($IsLinux) {
+            if (Get-Command notify-send -ErrorAction SilentlyContinue) {
+                $urgency = if ($IsError) { 'critical' } else { 'normal' }
+                & notify-send --urgency=$urgency $Title $Message 2>$null
+            }
+        }
+    }
+    catch {
+        # Notificacion es best-effort, nunca debe romper el flujo
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # HELPER: Verificar exit code de pac
 # ─────────────────────────────────────────────────────────────────────────────
 function Assert-PacSuccess {
     param([string]$StepDescription)
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR en: $StepDescription (exit code: $LASTEXITCODE)"
+        Send-Notification -Message "ERROR en: $StepDescription" -IsError
         exit 1
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Detectar si un error de pac es temporal (reintentalbe)
+# vs. error permanente (dependencias faltantes, etc)
+# ─────────────────────────────────────────────────────────────────────────────
+function Test-IsRetryableError {
+    param([string]$ErrorOutput)
+    
+    $retryablePatterns = @(
+        "Cannot start another.*running",
+        "previous.*running",
+        "timeout",
+        "timed out",
+        "tiempo de espera",
+        "canal de solicitud",
+        "server.*busy",
+        "service.*unavailable",
+        "system is busy",
+        "try again later"
+    )
+    
+    foreach ($pattern in $retryablePatterns) {
+        if ($ErrorOutput -match $pattern) {
+            return $true
+        }
+    }
+    
+    return $false
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HELPER: Ejecutar comando pac con reintentos inteligentes
+# - Ejecuta el comando DIRECTAMENTE (sin Start-Job)
+# - Si falla con error temporal: espera y reintenta
+# - Si falla con error permanente: falla inmediatamente
+# - maxWaitSeconds controla el tiempo TOTAL de reintentos
+# ─────────────────────────────────────────────────────────────────────────────
+function Invoke-PacWithRetry {
+    param(
+        [string]$CommandBlock,
+        [string]$Description,
+        [int]$MaxWaitSeconds = 3600,
+        [int]$DelaySeconds = 30
+    )
+    
+    $startTime = Get-Date
+    $maxWait = [TimeSpan]::FromSeconds($MaxWaitSeconds)
+    $attempt = 0
+    
+    while ($true) {
+        $attempt++
+        $now = Get-Date -Format "HH:mm:ss"
+        Write-Log "  -> Intento $attempt : $Description (inicio: $now)"
+        
+        # Ejecutar comando directamente y capturar salida
+        $pacOutput = Invoke-Expression "$CommandBlock 2>&1" | Out-String
+        $exitCode = $LASTEXITCODE
+        
+        if ($exitCode -eq 0) {
+            Write-Log "  -> OK: $Description completado."
+            return $true
+        }
+        
+        # Fallo: mostrar error
+        $errorPreview = $pacOutput.Trim()
+        if ($errorPreview.Length -gt 500) {
+            $errorPreview = $errorPreview.Substring(0, 500) + "..."
+        }
+        Write-Log "  -> Fallo (exit code: $exitCode)" -Color Red
+        Write-Log "     $errorPreview"
+        
+        # Verificar si es error reintentalbe
+        if (-not (Test-IsRetryableError $pacOutput)) {
+            Write-Log "  -> ERROR PERMANENTE (no reintentalbe). Abortando." -Color Red
+            return $false
+        }
+        
+        # Verificar si se agoto el tiempo total
+        if ((Get-Date) - $startTime -ge $maxWait) {
+            Write-Log "  -> TIMEOUT: Se agotaron los $($MaxWaitSeconds / 60) minutos de reintentos." -Color Red
+            return $false
+        }
+        
+        # Esperar antes de reintentar
+        $remainingSec = [math]::Round(($maxWait - ((Get-Date) - $startTime)).TotalSeconds)
+        Write-Log "  -> Error temporal. Reintentando en $DelaySeconds seg (quedan $remainingSec seg)..."
+        Start-Sleep -Seconds $DelaySeconds
     }
 }
 
@@ -368,6 +527,7 @@ Write-Log "[2/8] Validando config.json..."
 if (-Not (Test-Path $configPath)) {
     $template = [ordered]@{
         solutionName = "MiSolucion"
+        maxWaitSeconds = 3600
         dev          = [ordered]@{ authProfile = "cliente_dev_usuario"; env = "https://orgdev.crm.dynamics.com" }
         pre          = [ordered]@{ authProfile = "cliente_pre_usuario"; env = "https://orgpre.crm.dynamics.com" }
         pro          = [ordered]@{ authProfile = "cliente_pro_usuario"; env = "https://orgpro.crm.dynamics.com" }
@@ -379,12 +539,14 @@ if (-Not (Test-Path $configPath)) {
     Write-Log ""
     Write-Log "  INFO: Formato de authProfile: <cliente>_<entorno>_<usuario>"
     Write-Log "         Ejemplo: microsoft_dev_coviedo"
+    Write-Log "  INFO: maxWaitSeconds: max segundos de espera para importacion (default: 3600 = 1h)"
     Write-Log "  INFO: Para ver perfiles existentes: pac auth list"
     exit 0
 }
 
 $config = Get-Content $configPath -Raw | ConvertFrom-Json
 $solutionName = $config.solutionName
+$maxWaitSeconds = if ($config.maxWaitSeconds) { $config.maxWaitSeconds } else { 3600 }
 
 if (-not $solutionName -or $solutionName -eq "MiSolucion") {
     Write-Log "  ATENCION: 'solutionName' en config.json tiene el valor de ejemplo." -Color Yellow
@@ -428,6 +590,7 @@ if ($configErrors.Count -gt 0) {
 }
 
 Write-Log "  OK: Solucion = $solutionName"
+Write-Log "  Timeout importacion: $($maxWaitSeconds / 60) minutos"
 Write-Log ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -785,8 +948,9 @@ if ($deployPro) {
 
 # ─────────────────────────────────────────────────────────────────────────────
 # FUNCION DE IMPORTACION
-# Si la solucion ya existe en destino -> Upgrade (holding + apply)
-# Si es primera vez -> Import directo
+# Si la solucion ya existe en destino -> Stage and Upgrade (un solo comando)
+# Si es primera vez -> Import directo con reintentos
+# Usa --async para evitar el timeout HTTP de 30 min del CLI
 # ─────────────────────────────────────────────────────────────────────────────
 function Import-Solution {
     param(
@@ -799,6 +963,8 @@ function Import-Solution {
     Write-Log "  Importando solucion en $EnvLabel..."
     Select-AuthProfile $ProfileName $EnvUrl
 
+    $asyncMinutes = [math]::Ceiling($maxWaitSeconds / 60)
+
     # Detectar si la solucion ya existe en el entorno destino
     Write-Log "  -> Verificando si la solucion ya existe en $EnvLabel..."
     $targetSolutions = Get-PacSolutionList
@@ -806,38 +972,57 @@ function Import-Solution {
     $solutionExists = $null -ne $existingSolution
 
     if ($solutionExists) {
-        # --- UPGRADE: la solucion ya existe ---
-        Write-Log "  -> Solucion encontrada en $EnvLabel. Modo: UPGRADE (holding + apply)"
+        # --- UPGRADE: Stage and Upgrade en un solo comando ---
+        Write-Log "  -> Solucion encontrada en $EnvLabel. Modo: STAGE AND UPGRADE"
 
-        # Paso 1: Importar como holding
-        Write-Log "  -> Stage: importando como holding solution..."
+        # Detectar holding huerfano de ejecucion anterior (_Upgrade)
+        $holdingName = "${solutionName}_Upgrade"
+        $existingHolding = Find-Solution -SolutionList $targetSolutions -SolutionName $holdingName
+        if ($null -ne $existingHolding) {
+            $holdingVer = Get-SolutionVersion $existingHolding
+            Write-Log "  ERROR: Holding huerfano detectado: $holdingName (v$holdingVer)" -Color Red
+            Write-Log "  Esto indica que una importacion anterior quedo incompleta."
+            Write-Log "  Limpia manualmente en $EnvLabel antes de continuar:"
+            Write-Log "    Opcion 1: Aplicar upgrade pendiente -> pac solution upgrade --solution-name `"$solutionName`""
+            Write-Log "    Opcion 2: Eliminar holding          -> pac solution delete --solution-name `"$holdingName`""
+            Send-Notification -Message "ERROR: Holding huerfano en $EnvLabel" -IsError
+            exit 1
+        }
+
+        $importCmd = "pac solution import --path `"$managedZip`" --stage-and-upgrade --async --max-async-wait-time $asyncMinutes"
         if ($SettingsFile -and (Test-Path $SettingsFile)) {
             Write-Log "  -> Usando settings-file: $(Split-Path $SettingsFile -Leaf)"
-            pac solution import --path $managedZip --import-as-holding --settings-file $SettingsFile
+            $importCmd += " --settings-file `"$SettingsFile`""
         }
-        else {
-            pac solution import --path $managedZip --import-as-holding
-        }
-        Assert-PacSuccess "Importar solucion como holding en $EnvLabel"
 
-        # Paso 2: Aplicar upgrade (elimina componentes huerfanos)
-        Write-Log "  -> Aplicando upgrade..."
-        pac solution upgrade --solution-name $solutionName
-        Assert-PacSuccess "Aplicar upgrade en $EnvLabel"
-        Write-Log "  OK: Upgrade completado en $EnvLabel ($EnvUrl)"
+        $importSuccess = Invoke-PacWithRetry -CommandBlock $importCmd -Description "Stage and Upgrade en $EnvLabel" -MaxWaitSeconds $maxWaitSeconds -DelaySeconds 30
+
+        if (-not $importSuccess) {
+            Write-Log "ERROR en: Stage and Upgrade en $EnvLabel (reintentos agotados, exit code: $LASTEXITCODE)"
+            Send-Notification -Message "ERROR: Importacion fallida en $EnvLabel" -IsError
+            exit 1
+        }
+
+        Write-Log "  OK: Stage and Upgrade completado en $EnvLabel ($EnvUrl)"
     }
     else {
-        # --- PRIMERA VEZ: import directo ---
+        # --- PRIMERA VEZ: import directo CON REINTENTOS ---
         Write-Log "  -> Solucion NO encontrada en $EnvLabel. Modo: IMPORT DIRECTO (primera vez)"
 
+        $importCmd = "pac solution import --path `"$managedZip`" --async --max-async-wait-time $asyncMinutes"
         if ($SettingsFile -and (Test-Path $SettingsFile)) {
             Write-Log "  -> Usando settings-file: $(Split-Path $SettingsFile -Leaf)"
-            pac solution import --path $managedZip --settings-file $SettingsFile
+            $importCmd += " --settings-file `"$SettingsFile`""
         }
-        else {
-            pac solution import --path $managedZip
+
+        $importSuccess = Invoke-PacWithRetry -CommandBlock $importCmd -Description "Importar solucion en $EnvLabel" -MaxWaitSeconds $maxWaitSeconds -DelaySeconds 30
+
+        if (-not $importSuccess) {
+            Write-Log "ERROR en: Importar solucion en $EnvLabel (reintentos agotados, exit code: $LASTEXITCODE)"
+            Send-Notification -Message "ERROR: Importacion fallida en $EnvLabel" -IsError
+            exit 1
         }
-        Assert-PacSuccess "Importar solucion en $EnvLabel"
+
         Write-Log "  OK: Import directo completado en $EnvLabel ($EnvUrl)"
     }
 }
@@ -880,3 +1065,5 @@ Write-Log "==============================================="
 Write-Log ""
 Write-Log "  RECORDATORIO: Si hubo cambios en settings_pre/pro.json,"
 Write-Log "  haz commit y push al repo del cliente."
+
+Send-Notification -Message "Despliegue completado: $solutionName -> $TargetEnv ($elapsed)"

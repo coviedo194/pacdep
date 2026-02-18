@@ -1,4 +1,4 @@
-# pacdep.ps1 — Automatización de despliegues de soluciones de Dataverse con PAC - v1.0.3
+# pacdep.ps1 — Automatización de despliegues de soluciones de Dataverse con PAC - v1.0.4
 
 Script PowerShell para exportar e importar soluciones de Dataverse (Power Platform) entre entornos DEV, PRE y PRO usando el CLI `pac`. Automatiza el flujo de despliegue, genera archivos de configuración y valida settings, permitiendo un proceso colaborativo y seguro.
 
@@ -68,6 +68,7 @@ pwsh ./pacdep.ps1
 ```json
 {
   "solutionName": "NombreDeLaSolucion",
+  "maxWaitSeconds": 3600,
   "dev": {
     "authProfile": "cliente_dev_usuario",
     "env": "https://org-dev.crm.dynamics.com"
@@ -82,6 +83,16 @@ pwsh ./pacdep.ps1
   }
 }
 ```
+
+### Configuración de maxWaitSeconds
+
+- **Qué es**: Tiempo máximo de espera (en segundos) para que una importación de solución se complete en el servidor.
+- **Valor por defecto**: `3600` (1 hora) - cubre la mayoría de soluciones.
+- **Cuándo cambiarlo**:
+  - Solución **pequeña** (< 5 min): Cambia a `300` (5 min) para feedback más rápido.
+  - Solución **grande** (> 30 min): Cambia a `3600` (1 hora, default) o más.
+  - Solución **muy grande** (> 1 hora): Cambia a `7200` (2 horas) o más.
+- **Nota**: Si durante la importación falla, el script reintenta automáticamente (hasta 3 veces). No bloquea: solo espera hasta detectar que la solución esté lista.
 
 ## Ejemplo de settings_env.json (autogenerado según solución)
 
@@ -106,19 +117,76 @@ pwsh ./pacdep.ps1
 ---
 
 
-## ¿Qué hace el script?
+## ¿Qué hace el script? (pseudocódigo)
 
-- Verifica que `pac` esté instalado y accesible.
-- Genera y valida `config.json` (plantilla si no existe).
-- Valida perfiles de autenticación (crea de forma asistida si faltan).
-- Elimina los archivos zip generados localmente por el propio script (solution.zip y solution_managed.zip) antes de exportar una nueva version. No elimina ningun archivo del usuario ni ningun archivo remoto.
-- Incrementa versión de la solución en DEV.
-- Exporta solución (unmanaged y managed).
-- Genera archivos settings.json para los entornos donde se quiera importar.***
-- Compara estructura de setting y detiene si hay diferencias: Compara entre el settings nuevo generado a partir de la reciente exportación vs. los settings que ya se tienen configurados en el directorio/repo, OJO: no compara nada contra lo que haya en los entornos destinos.
-- Importa el zip managed a PRE/PRO (upgrade si ya existe, import directo si es primera vez).
-- Pide confirmación antes de importar a PRO.
-- Genera un log por cada ejecución en la carpeta logs/.
+```
+INICIO (parametros: TargetEnv, ExportOnly, ImportOnly, SkipVersionIncrement)
+│
+├─ [1/8] Verificar pac CLI instalado
+│
+├─ [2/8] Validar config.json
+│     ├─ Si no existe → generar plantilla de ejemplo y SALIR
+│     └─ Validar que no tenga valores de ejemplo en entornos requeridos
+│
+├─ [3/8] Validar perfiles de autenticacion (pac auth)
+│     └─ Si no existe un perfil → preguntar si crearlo
+│
+├─ [4/8] Limpiar zips anteriores (o validar que existan si es ImportOnly)
+│
+├─ SI NO es ImportOnly:
+│  │
+│  ├─ Conectar a DEV (pac auth select)
+│  │
+│  ├─ [5/8] Incrementar version (4to segmento) en DEV
+│  │     └─ pac solution online-version
+│  │
+│  └─ [6/8] Exportar solucion desde DEV
+│        ├─ Exportar unmanaged → solution.zip (respaldo)
+│        └─ Exportar managed  → solution_managed.zip (se importa a destino)
+│
+├─ [7/8] Verificar settings (variables de entorno / conexiones)
+│     ├─ Generar settings_generated.json desde solution.zip
+│     ├─ Si la solucion no tiene env vars ni conn refs → continuar sin settings
+│     ├─ Si es primera vez → copiar plantilla y SALIR (config manual)
+│     └─ Comparar ESTRUCTURA (SchemaName / LogicalName) vs. settings existentes
+│           └─ Si hay diferencias → mostrar detalle y SALIR
+│
+├─ SI es ExportOnly → mostrar resumen y SALIR
+│
+├─ SI destino incluye PRO → pedir confirmacion (Read-Host S/N)
+│
+├─ [8/8] Importar solucion managed en destino(s)
+│     │
+│     └─ POR CADA entorno destino (PRE, PRO):
+│           │
+│           ├─ Conectar al entorno (pac auth select)
+│           ├─ Listar soluciones del entorno (pac solution list --json)
+│           │
+│           ├─ SI la solucion YA EXISTE → modo STAGE AND UPGRADE:
+│           │     │
+│           │     ├─ Buscar holding huerfano (_Upgrade)
+│           │     │     └─ Si existe → ERROR: mostrar instrucciones y SALIR
+│           │     │
+│           │     └─ pac solution import --stage-and-upgrade --async con reintentos
+│           │           (Stage and Upgrade = holding + apply en un solo comando)
+│           │
+│           └─ SI la solucion NO EXISTE → modo IMPORT DIRECTO:
+│                 └─ pac solution import --async con reintentos
+│
+├─ Mostrar resumen final (solucion, version, duracion)
+└─ Recordar hacer commit y push de settings
+
+ERRORES TEMPORALES (se reintentan):
+  - "Cannot start another [X] ... running"
+  - "timeout" / "timed out" / "tiempo de espera" (multi-idioma)
+  - "server busy" / "service unavailable"
+  - "try again later"
+
+ERRORES PERMANENTES (se aborta):
+  - Dependencias faltantes
+  - Version incompatible
+  - Cualquier otro error no listado arriba
+```
 
 ---
 
@@ -186,7 +254,7 @@ MIT — Ver LICENSE
 
 ---
 
-> **Copilot-ready:** el repo incluye instrucciones para GitHub Copilot.
+> **Agent-ready:** el repo incluye instrucciones estándar para agentes de IA (Agents.md).
 
 ---
 
@@ -197,6 +265,6 @@ El autor no se hace responsable por daños, perdida de datos o errores derivados
 ---
 
 Happy coding!
-Jajetopata! 🇵🇾✌🏽
+Maitei! 🇵🇾
 
 ---
