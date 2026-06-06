@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Archivos generados por el script (no commitear)
+logs/
+solution.zip
+solution_managed.zip
+solution/
+settings_generated.json
+
+# Editor
+.vscode/
+*.swp
+*.swo
+*~
+
+# Archivos de configuración, en esta repo no se commitean, no confundir con la repo que usted genere para su proyecto, en la cual si se deben commitear.
+settings_pre.json
+settings_pro.json
+config.json
