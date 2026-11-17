@@ -1,4 +1,4 @@
-# pacdep.ps1 — Automatización de despliegues de soluciones de Dataverse con PAC - v1.0.4
+# pacdep.ps1 — Automatización de despliegues de soluciones de Dataverse con PAC - v1.0.5
 
 Script PowerShell para exportar e importar soluciones de Dataverse (Power Platform) entre entornos DEV, PRE y PRO usando el CLI `pac`. Automatiza el flujo de despliegue, genera archivos de configuración y valida settings, permitiendo un proceso colaborativo y seguro.
 
@@ -135,7 +135,8 @@ INICIO (parametros: TargetEnv, ExportOnly, ImportOnly, SkipVersionIncrement, Unp
 │     └─ Validar que no tenga valores de ejemplo en entornos requeridos
 │
 ├─ [4/9] Validar perfiles de autenticacion (pac auth)
-│     └─ Si no existe un perfil → preguntar si crearlo
+│     ├─ Si no existe un perfil → preguntar si crearlo
+│     └─ Comprobar conexion a cada entorno requerido antes de limpiar zips o incrementar version
 │
 ├─ [5/9] Limpiar zips anteriores (o validar que existan si es ImportOnly)
 │
@@ -195,6 +196,29 @@ ERRORES PERMANENTES (se aborta):
 ```
 
 ---
+
+## Sesion caducada o verificacion MFA requerida
+
+Si Microsoft devuelve un error como `AADSTS50078`, el script se detiene con un
+mensaje que identifica el perfil y el entorno e indica el comando para renovar
+la sesion. El detalle tecnico completo queda guardado en `logs/`.
+
+Ejecuta el comando mostrado por el script y completa el acceso de Microsoft:
+
+```bash
+pac auth create --name "<perfil>" --environment "<url-del-entorno>"
+pac env who
+```
+
+La conexion se comprueba antes de borrar exportaciones o incrementar la version
+en DEV. Los errores de MFA no se reintentan automaticamente.
+
+Si un intento anterior ya exporto los ZIP y fallo antes de importar, puedes
+reutilizarlos sin incrementar otra vez la version:
+
+```bash
+pwsh ./pacdep.ps1 -ImportOnly -TargetEnv pro
+```
 
 ## Ficheros generados por el script dentro de la carpeta 
 

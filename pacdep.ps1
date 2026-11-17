@@ -1,6 +1,6 @@
 # =============================================================================
 # pacdep.ps1 - Automated Dataverse Solution Deployer
-# Version: 1.0.4
+# Version: 1.0.5
 # Autor: Carlos Oviedo Gibbons (github.com/coviedo194)
 # Licencia: MIT
 # Descripcion: Exporta una solucion de Dataverse desde DEV e importa a PRE/PRO
@@ -89,7 +89,7 @@ param(
     [switch]$ShowHelp
 )
 
-$ScriptVersion = "1.0.4"
+$ScriptVersion = "1.0.5"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # SHOW HELP
@@ -328,10 +328,43 @@ function Send-Notification {
 # ─────────────────────────────────────────────────────────────────────────────
 # HELPER: Verificar exit code de pac
 # ─────────────────────────────────────────────────────────────────────────────
+function Test-PacAuthenticationError {
+    param([string]$Output)
+    return $Output -match 'AADSTS(50076|50078|50079|50173|70043|700082)\b|multi-factor authentication.*expired|refresh your multi-factor|authentication token.*expired'
+}
+
+function Write-PacErrorDetails {
+    param([string]$Output)
+
+    if (-not $Output) { return }
+
+    if (Test-PacAuthenticationError -Output $Output) {
+        Add-Content -Path $logFile -Value "Detalle tecnico de PAC:`n$Output"
+        Write-Log "  ERROR: La sesion de Microsoft ha caducado o requiere verificar MFA." -Color Red
+        if ($script:pacAuthProfile) {
+            Write-Log "  Perfil: $script:pacAuthProfile"
+            Write-Log "  Entorno: $script:pacAuthEnvUrl"
+        }
+        Write-Log "  Inicia sesion de nuevo y completa la verificacion de Microsoft:"
+        if ($script:pacAuthProfile -and $script:pacAuthEnvUrl) {
+            Write-Log "    pac auth create --name `"$script:pacAuthProfile`" --environment `"$script:pacAuthEnvUrl`""
+        }
+        else {
+            Write-Log "    pac auth create --name <perfil> --environment <url-del-entorno>"
+        }
+        Write-Log "  Despues comprueba la conexion con: pac env who"
+        Write-Log "  Detalle tecnico completo en: $logFile"
+    }
+    else {
+        Write-Log $Output.Trim()
+    }
+}
+
 function Assert-PacSuccess {
-    param([string]$StepDescription)
+    param([string]$StepDescription, [string]$Output)
     if ($LASTEXITCODE -ne 0) {
         Write-Log "ERROR en: $StepDescription (exit code: $LASTEXITCODE)"
+        Write-PacErrorDetails -Output $Output
         Send-Notification -Message "ERROR en: $StepDescription" -IsError
         exit 1
     }
@@ -343,6 +376,8 @@ function Assert-PacSuccess {
 # ─────────────────────────────────────────────────────────────────────────────
 function Test-IsRetryableError {
     param([string]$ErrorOutput)
+
+    if (Test-PacAuthenticationError -Output $ErrorOutput) { return $false }
     
     $retryablePatterns = @(
         "Cannot start another.*running",
@@ -400,12 +435,8 @@ function Invoke-PacWithRetry {
         }
         
         # Fallo: mostrar error
-        $errorPreview = $pacOutput.Trim()
-        if ($errorPreview.Length -gt 500) {
-            $errorPreview = $errorPreview.Substring(0, 500) + "..."
-        }
         Write-Log "  -> Fallo (exit code: $exitCode)" -Color Red
-        Write-Log "     $errorPreview"
+        Write-PacErrorDetails -Output $pacOutput
         
         # Verificar si es error reintentalbe
         if (-not (Test-IsRetryableError $pacOutput)) {
@@ -431,8 +462,8 @@ function Invoke-PacWithRetry {
 # Soporta distintos formatos de salida de pac solution list
 # ─────────────────────────────────────────────────────────────────────────────
 function Get-PacSolutionList {
-    $rawOutput = pac solution list --json 2>$null
-    Assert-PacSuccess "Listar soluciones (pac solution list --json)"
+    $rawOutput = pac solution list --json 2>&1
+    Assert-PacSuccess -StepDescription "Listar soluciones (pac solution list --json)" -Output ($rawOutput | Out-String)
 
     $jsonText = ($rawOutput | Out-String).Trim()
 
@@ -697,22 +728,21 @@ function Select-AuthProfile {
     Write-Log "  -> Seleccionando perfil '$ProfileName'..."
     pac auth select --name $ProfileName
     Assert-PacSuccess "Seleccionar perfil '$ProfileName'"
+    $script:pacAuthProfile = $ProfileName
+    $script:pacAuthEnvUrl = $EnvUrl
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # VALIDAR PERFILES DE AUTENTICACION
 # ─────────────────────────────────────────────────────────────────────────────
 Write-Log "[4/9] Validando perfiles de autenticacion..."
-if (-not $ImportOnly) {
-    Test-AuthProfile $config.dev.authProfile $config.dev.env
-}
-if (-not $ExportOnly) {
-    if ($deployPre) {
-        Test-AuthProfile $config.pre.authProfile $config.pre.env
-    }
-    if ($deployPro) {
-        Test-AuthProfile $config.pro.authProfile $config.pro.env
-    }
+foreach ($envKey in $requiredEnvs) {
+    $envConfig = $config.$envKey
+    Select-AuthProfile -ProfileName $envConfig.authProfile -EnvUrl $envConfig.env
+    Write-Log "  -> Comprobando conexion a $($envKey.ToUpper())..."
+    $connectionOutput = pac env who 2>&1 | Out-String
+    Assert-PacSuccess -StepDescription "Comprobar autenticacion en $($envKey.ToUpper())" -Output $connectionOutput
+    Write-Log "  OK: Conexion a $($envKey.ToUpper()) verificada."
 }
 Write-Log ""
 
@@ -789,14 +819,14 @@ if (-not $ImportOnly) {
     Write-Log "[7/9] Exportando solucion desde DEV..."
 
     Write-Log "  Exportando unmanaged..."
-    pac solution export --name $solutionName --path $PSScriptRoot --overwrite
-    Assert-PacSuccess "Exportar solucion unmanaged"
+    $exportOutput = pac solution export --name $solutionName --path $PSScriptRoot --overwrite 2>&1 | Out-String
+    Assert-PacSuccess -StepDescription "Exportar solucion unmanaged" -Output $exportOutput
     Rename-Item $pacUnmanaged $unmanagedZip -Force
     Write-Log "  OK: $unmanagedZip"
 
     Write-Log "  Exportando managed..."
-    pac solution export --name $solutionName --path $PSScriptRoot --managed --overwrite
-    Assert-PacSuccess "Exportar solucion managed"
+    $exportOutput = pac solution export --name $solutionName --path $PSScriptRoot --managed --overwrite 2>&1 | Out-String
+    Assert-PacSuccess -StepDescription "Exportar solucion managed" -Output $exportOutput
     Rename-Item $pacManaged $managedZip -Force
     Write-Log "  OK: $managedZip"
     Write-Log ""
